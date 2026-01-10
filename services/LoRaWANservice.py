@@ -41,7 +41,7 @@ class LoRaWANService:
     def send_data(self, data):
         if not self.lora.has_joined():
             print("[LoRaWAN] Dispositivo não está conectado à rede LoRaWAN. Não é possível enviar dados.")
-            return
+            return False
         
         if self.socket is None:
             try:
@@ -50,13 +50,18 @@ class LoRaWANService:
                 print("[LoRaWAN] Erro ao criar socket LoRaWAN.")
                 print("[LoRaWAN] A desligar LoRa...")
                 self.disconnect()
-                return
+                return False
 
-        self.socket.setsockopt(socket.SOL_LORA, socket.SO_DR, 3)
-        self.socket.setblocking(True)
-        self.socket.send(data)
-        self.socket.setblocking(False)
-        print("[LoRaWAN] Dados enviados via LoRaWAN: {}".format(data))
+        try:
+            self.socket.setsockopt(socket.SOL_LORA, socket.SO_DR, 3)
+            self.socket.setblocking(True)
+            self.socket.send(data)
+            self.socket.setblocking(False)
+            print("[LoRaWAN] Dados enviados via LoRaWAN: {}".format(data))
+            return True
+        except:
+            print("[LoRaWAN] Erro ao enviar dados via LoRaWAN.")
+            return False
 
     def get_socket(self):
         return self.socket
