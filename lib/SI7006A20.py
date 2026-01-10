@@ -51,6 +51,12 @@ class SI7006A20:
         data = self.i2c.readfrom(SI7006A20_I2C_ADDR, 2)
         data = self._getWord(data[0], data[1])
         humidity = ((125.0 * data) / 65536.0) - 6.0
+
+        if humidity > 100:
+            humidity = 100.0
+        elif humidity < 0:
+            humidity = 0.0
+
         return humidity
 
     def read_user_reg(self):
