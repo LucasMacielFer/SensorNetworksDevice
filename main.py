@@ -4,6 +4,7 @@ from services.LoRaWANservice import LoRaWANService
 from services.BLEservice import BLEService
 from services.FormatterService import FormatterService
 
+import machine
 import pycom
 import time
 from network import Bluetooth
@@ -35,19 +36,22 @@ LORAWAN_APP_KEY = '***REMOVED***'
 BLE_DEVICE_NAME='LP***REMOVED***'
 BLE_MANUFACTURER_DATA='PyCom'
 
+# Constantes (modo de comunicação)
+MODE_MQTT = 1
+MODE_LORAWAN = 2
+MAX_TRIES = 2
+
 def main():
     pycom.heartbeat(False)
     pycom.rgbled(COLOR_INIT)
 
-    # Por padrão: Tenta primeiro MQTT
-    cooldown_count = 0
-    comm_mode = 1
     active = True
-    set_inactive = False
+
+    cooldown_count = 0
+    comm_mode = MODE_MQTT
     wifi_pwd = WIFI_PASSWORD
     wifi_ssid = WIFI_SSID
-    wifi_changed = False
-    woke_up = False
+
 
     ble_ack_queue = []
 
@@ -80,7 +84,7 @@ def main():
 
         # Mode
         if cmd == 0x01:
-            nonlocal comm_mode, wifi_changed, active
+            nonlocal comm_mode, active
 
             try:
                 comm_mode = int(value[0])
@@ -88,49 +92,33 @@ def main():
                 print('[BLE] MODE inválido')
                 return
 
-            if comm_mode == 1:
+            if comm_mode == MODE_MQTT:
                 print('[BLE] Modo MQTT selecionado.')
-                wifi_changed = True
-                if active:
-                    pycom.rgbled(COLOR_INIT)
-            elif comm_mode == 2:
-                print('[BLE] Modo LoRaWAN selecionado.')
-                if active:
-                    pycom.rgbled(COLOR_INIT)
             else:
-                print('[BLE] Modo desconhecido')
+                comm_mode = MODE_LORAWAN
+                print('[BLE] Modo LoRaWAN selecionado.')
+                
+            if active:
+                pycom.rgbled(COLOR_INIT)
 
             ble_ack_queue.append(b'\x81\x01')  # ACK MODE
 
         # Active
         elif cmd == 0x02:
-            nonlocal active, set_inactive, woke_up
+            nonlocal active
 
-            try:
-                active = not (value[0] == 0)
-            except:
-                print('[BLE] ACTIVE inválido')
-                return
+            active = False
+            pycom.rgbled(COLOR_INACTIVE)
 
-            if active:
-                set_inactive = False
-                pycom.rgbled(COLOR_INIT)
-                woke_up = True
-
-            else:
-                set_inactive = True
-                pycom.rgbled(COLOR_INACTIVE)
-
-            print('[BLE] Ativo:', active)
+            print('[BLE] Dispositivo desativado.')
             ble_ack_queue.append(b'\x82\x01')  # ACK ACTIVE
 
         # SSID
         elif cmd == 0x03:
-            nonlocal wifi_ssid, wifi_changed
+            nonlocal wifi_ssid
 
             try:
                 wifi_ssid = value.decode('utf-8')
-                wifi_changed = True
                 print('[BLE] SSID WiFi:', wifi_ssid)
                 ble_ack_queue.append(b'\x83\x01')  # ACK SSID
             except:
@@ -138,11 +126,10 @@ def main():
 
         # Password
         elif cmd == 0x04:
-            nonlocal wifi_pwd, wifi_changed
+            nonlocal wifi_pwd
 
             try:
                 wifi_pwd = value.decode('utf-8')
-                wifi_changed = True
                 print('[BLE] Senha WiFi recebida')
                 ble_ack_queue.append(b'\x84\x01')  # ACK PWD
             except:
@@ -154,10 +141,10 @@ def main():
 
     # Inicializa serviços
     sensors_service = SensorsService()
-    mqtt_service = MQTTService(WIFI_SSID, WIFI_PASSWORD, MQTT_USER, MQTT_BROKER, DEVICE_UUID)
     lorawan_service = LoRaWANService(LORAWAN_DEV_EUI, LORAWAN_APP_EUI, LORAWAN_APP_KEY)
     ble_service = BLEService(BLE_DEVICE_NAME, BLE_MANUFACTURER_DATA, conn_cb)
     ble_service.set_callback(ble_cmd_cb)
+    mqtt_service = None
 
     while True:
         while ble_ack_queue:
@@ -168,50 +155,24 @@ def main():
                 print('[BLE] Erro ao enviar ACK: ', e)
 
         if active:
-            if wifi_changed:
-                wifi_changed = False
-                if (not mqtt_service.is_connected() or
-                    mqtt_service.password != wifi_pwd or
-                    mqtt_service.ssid != wifi_ssid):
-                    
-                    mqtt_service.password = wifi_pwd
-                    mqtt_service.ssid = wifi_ssid
-                    mqtt_service.connect_to_wifi()
-                    mqtt_service.connect_to_mqtt(DEVICE_UUID)
-
-            if woke_up:
-                woke_up = False
-                cooldown_count = 0
-                print("[MAIN] Dispositivo acordado.")
-                print("[MAIN] Tentando conectar...")
-
-                if not mqtt_service.is_connected():
-                    mqtt_service.connect_to_wifi()
-                if not mqtt_service.is_client_connected():
-                    mqtt_service.connect_to_mqtt(DEVICE_UUID)
-                if not lorawan_service.is_connected():
-                    lorawan_service.join_lorawan()
-
-                if mqtt_service.is_client_connected() and mqtt_service.is_connected():
-                    print("[MAIN] Reconectado ao MQTT Broker.")
-                if lorawan_service.is_connected():
-                    print("[MAIN] Reconectado à rede LoRaWAN.")
-                
-
             if cooldown_count <= 0:
                 cooldown_count = TIME_BETWEEN_READINGS
+
                 # Lê dados dos sensores
                 sensors_service.read_sensors()
                 sensor_data = sensors_service.get_sensor_data()
                 sensors_service.print_sensor_data()
 
-                mqtt_available = mqtt_service.is_connected() and mqtt_service.is_client_connected()
                 lorawan_available = lorawan_service.is_connected()
 
-                use_mqtt = mqtt_available and comm_mode == 1 or (mqtt_available and not lorawan_available)
-                use_lorawan = (lorawan_available and comm_mode == 2) or (not mqtt_available and lorawan_available)
+                # Se o utilizador tiver selecionadoo MQTT, ou se o LoRaWAN não estiver disponível
+                if comm_mode == MODE_MQTT or not lorawan_available:
+                    mqtt_service = MQTTService(wifi_ssid, wifi_pwd, MQTT_USER, MQTT_BROKER, DEVICE_UUID)
+                    mqtt_available = mqtt_service.is_connected() and mqtt_service.is_client_connected()
+                else:
+                    mqtt_available = False
 
-                if use_mqtt:
+                if mqtt_available:
                     mqtt_payload = FormatterService.format_for_mqtt(
                         sensor_data["temperature"],
                         sensor_data["humidity"],
@@ -222,13 +183,27 @@ def main():
 
                     try:
                         pycom.rgbled(COLOR_SENDING)
-                        mqtt_service.publish(MQTT_TOPIC, mqtt_payload)
-                        time.sleep(0.1)
+                        
+                        for attempt in range(MAX_TRIES):
+                            print("[MAIN] Tentativa {} de envio via MQTT...".format(attempt + 1))
+                            success = mqtt_service.publish(MQTT_TOPIC, mqtt_payload)
+                            time.sleep(1)
+
+                            if success:
+                                print("[MAIN] Dados enviados com sucesso via MQTT.")
+                                break
+
+                        if not success:
+                            print("[MAIN] Falha ao enviar dados via MQTT após múltiplas tentativas.")
+
                         pycom.rgbled(COLOR_MQTT)
+                        mqtt_service.disconnect()
+                        print("[MAIN] Desconectado do WiFi.")
                     except:
                         print("[MAIN] Erro ao enviar dados via MQTT.")
 
-                elif use_lorawan:
+                elif lorawan_available:
+                    success = False
                     lorawan_payload = FormatterService.format_for_lorawan(
                         sensor_data["temperature"],
                         sensor_data["humidity"],
@@ -239,56 +214,66 @@ def main():
 
                     try:
                         pycom.rgbled(COLOR_SENDING)
-                        lorawan_service.send_data(lorawan_payload)
-                        time.sleep(0.1)
+
+                        for attempt in range(MAX_TRIES):
+                            print("[MAIN] Tentativa {} de envio via LoRaWAN...".format(attempt + 1))
+                            success = lorawan_service.send_data(lorawan_payload)
+                            time.sleep(1)
+
+                            if success:
+                                print("[MAIN] Dados enviados com sucesso via LoRaWAN.")
+                                break
+
+                        if not success:
+                            print("[MAIN] Falha ao enviar dados via LoRaWAN após múltiplas tentativas.")
+
                         pycom.rgbled(COLOR_LORAWAN)
                     except:
                         print("[MAIN] Erro ao enviar dados via LoRaWAN.")
 
                 else:
-                    cooldown_count = 0;
+                    pycom.rgbled(COLOR_INACTIVE)
                     print("[MAIN] Nenhuma conexão disponível para envio de dados.")
                     print("[MAIN] Tentando reconectar...")
-                    mqtt_service.connect_to_wifi()
-                    mqtt_service.connect_to_mqtt(DEVICE_UUID)
                     lorawan_service.join_lorawan()
 
-                    if mqtt_service.is_client_connected() and mqtt_service.is_connected():
-                        print("[MAIN] Reconectado ao MQTT Broker.")
                     if lorawan_service.is_connected():
                         print("[MAIN] Reconectado à rede LoRaWAN.")
+                        pycom.rgbled(COLOR_INIT)
+                        cooldown_count = 0;
 
             time.sleep(5)
             cooldown_count -= 5
 
         else:
-            if set_inactive:
+            lorawan_available = lorawan_service.is_connected()
+            if comm_mode == MODE_MQTT or not lorawan_available:
+                mqtt_service = MQTTService(wifi_ssid, wifi_pwd, MQTT_USER, MQTT_BROKER, DEVICE_UUID)
                 mqtt_available = mqtt_service.is_connected() and mqtt_service.is_client_connected()
-                lorawan_available = lorawan_service.is_connected()
-                use_mqtt = mqtt_available and comm_mode == 1 or (mqtt_available and not lorawan_available)
-                use_lorawan = (lorawan_available and comm_mode == 2) or (not mqtt_available and lorawan_available)
+            else:
+                mqtt_available = False
 
-                print("[MAIN] Dispositivo inativo. Enviando payloads de desligamento...")
+            print("[MAIN] Dispositivo inativo. Enviando payload de desligamento...")
 
-                if use_mqtt:
-                    mqtt_payload = FormatterService.get_mqtt_shutdown_payload()
-                    mqtt_service.publish(MQTT_TOPIC, mqtt_payload)
-                    time.sleep(1)
-
-                elif use_lorawan:
-                    lorawan_payload = FormatterService.get_lora_shutdown_payload()
-                    lorawan_service.send_data(lorawan_payload)
-                    time.sleep(1)
-
-                set_inactive = False
-                print("[MAIN] Payloads de desligamento enviados.")
-                pycom.rgbled(COLOR_INACTIVE)
-
+            if mqtt_available:
+                mqtt_payload = FormatterService.get_mqtt_shutdown_payload()
+                mqtt_service.publish(MQTT_TOPIC, mqtt_payload)
                 mqtt_service.disconnect()
-                lorawan_service.disconnect()
-                print("[MAIN] Desconectado dos serviços de comunicação.")
+                time.sleep(1)
+                print("[MAIN] Payload de desligamento enviado via MQTT.")
 
-            time.sleep(5)
+            elif lorawan_available:
+                lorawan_payload = FormatterService.get_lora_shutdown_payload()
+                lorawan_service.send_data(lorawan_payload)
+                time.sleep(1)
+                print("[MAIN] Payload de desligamento enviado via LoRaWAN.")
+
+            else:
+                print("[MAIN] Nenhuma conexão disponível para envio do payload de desligamento.")
+    
+            print("[MAIN] Entrando em modo de baixo consumo...")
+            machine.pin_sleep_wakeup(['P14'], mode=machine.WAKEUP_ALL_LOW, enable_pull=True)
+            machine.deepsleep()
 
 if __name__ == "__main__":
     main()
