@@ -7,7 +7,7 @@ class FormatterService:
         dados = {
             "temperatura": temperature,
             "umidade": humidity,
-            "pressao": pressure,
+            "pressao": pressure/100,    # Convertendo para hPa
             "altura": altitude,
             "lux": lux,
             "source": 0,
