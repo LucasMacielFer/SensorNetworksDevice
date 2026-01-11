@@ -8,6 +8,7 @@ import machine
 import pycom
 import time
 from network import Bluetooth
+from machine import Pin
 
 # Cores para o LED
 COLOR_INACTIVE = 0x7F0000   # Vermelho
@@ -17,7 +18,7 @@ COLOR_INIT = 0x7F7F00       # Amarelo
 COLOR_SENDING = 0x007F00    # Verde
 
 # Configuração de temporização
-TIME_BETWEEN_READINGS = 300
+DEFAULT_TIME_BETWEEN_READINGS = 300
 
 # Configurações WiFi e MQTT
 WIFI_SSID = "***REMOVED***"
@@ -52,6 +53,7 @@ def main():
     wifi_pwd = WIFI_PASSWORD
     wifi_ssid = WIFI_SSID
 
+    time_between_readings = DEFAULT_TIME_BETWEEN_READINGS
 
     ble_ack_queue = []
 
@@ -135,9 +137,28 @@ def main():
             except:
                 print('[BLE] Password inválida')
 
+        # Tempo
+        elif cmd == 0x05:
+            nonlocal time_between_readings
+
+            try:
+                time_between_readings = int(value[0])
+                print('[BLE] Tempo entre leituras definido para {} segundos'.format(time_between_readings))
+            except:
+                print('[BLE] Tempo inválido')
+                return
+
+            ble_ack_queue.append(b'\x85\x01')  # ACK TIME
+
         else:
             print('[BLE] CMD desconhecido:', cmd)
 
+    # Callback interrupção botão
+    def int_btn(pin):
+        nonlocal active
+        active = False
+        pycom.rgbled(COLOR_INACTIVE)
+        print('[INT] Botão pressionado. Dispositivo desativado.')
 
     # Inicializa serviços
     sensors_service = SensorsService()
@@ -145,6 +166,10 @@ def main():
     ble_service = BLEService(BLE_DEVICE_NAME, BLE_MANUFACTURER_DATA, conn_cb)
     ble_service.set_callback(ble_cmd_cb)
     mqtt_service = None
+
+    # Configura interrupção do botão
+    btn = Pin('P14', mode=Pin.IN, pull=Pin.PULL_UP)
+    btn.callback(trigger=Pin.IRQ_FALLING, handler=int_btn)
 
     while True:
         while ble_ack_queue:
@@ -156,7 +181,7 @@ def main():
 
         if active:
             if cooldown_count <= 0:
-                cooldown_count = TIME_BETWEEN_READINGS
+                cooldown_count = time_between_readings
 
                 # Lê dados dos sensores
                 sensors_service.read_sensors()
